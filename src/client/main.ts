@@ -23,6 +23,7 @@ const els = {
   openExternal: document.getElementById("open-external") as HTMLButtonElement,
   focusMode: document.getElementById("focus-mode") as HTMLButtonElement,
   fullscreen: document.getElementById("fullscreen") as HTMLButtonElement,
+  focusExit: document.getElementById("focus-exit") as HTMLButtonElement,
   status: document.getElementById("status") as HTMLSpanElement,
   loadingIndicator: document.getElementById("loading-indicator") as HTMLSpanElement,
   fps: document.getElementById("fps") as HTMLSpanElement,
@@ -312,12 +313,14 @@ function applyFocusMode(enabled: boolean) {
   document.body.classList.toggle("focus-mode", enabled);
   els.focusMode.setAttribute("aria-pressed", String(enabled));
   els.focusMode.title = enabled ? "Exit focus mode (Ctrl+Shift+F)" : "Focus mode (Ctrl+Shift+F)";
+  els.focusExit.hidden = !enabled;
   localStorage.setItem(FOCUS_KEY, enabled ? "1" : "0");
   requestAnimationFrame(() => fitFrame());
 }
 function toggleFocusMode() { applyFocusMode(!focusMode); }
 applyFocusMode(focusMode);
 els.focusMode.addEventListener("click", toggleFocusMode);
+els.focusExit.addEventListener("click", () => applyFocusMode(false));
 
 function updateFullscreenUi() {
   const active = !!document.fullscreenElement;
