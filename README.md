@@ -25,8 +25,10 @@ is a smooth handoff rather than a context switch.
 - **Clipboard paste** — paste from your local clipboard into the remote browser
 - **Copy or open links** — copy any link's URL, or open it in your local browser
 - **Window resize** — match this window, a desktop preset, or custom dimensions
-- **Touch + mobile** — touch input plus an overlay sidebar on coarse-pointer devices
-- **Frame-based screencast** — periodic JPEG / PNG via `Page.startScreencast`, capped to 30 fps by default
+- **Touch + mobile** — touch input, keyboard-safe viewport handling, overlay sidebar, and tap-friendly controls
+- **Immersive mode** — focus mode and fullscreen controls for an app-like remote-browser surface
+- **Low-latency rendering** — client-side frame coalescing prevents stale screenshots from consuming main-thread time
+- **Frame-based screencast** — periodic JPEG / PNG via `Page.startScreencast`, up to 60 fps by default with stale-frame backpressure
 
 ## How it works
 
@@ -133,9 +135,9 @@ nor a Playwright cache is present.
 | `--listen-port <port>` | UI bind port (default `8768`) |
 | `--allow-origin <origin>` | Allow an additional WebSocket Origin; repeatable. Same-origin is allowed automatically |
 | `--width <px>` `--height <px>` | Override viewport via `Emulation.setDeviceMetricsOverride` |
-| `--max-fps <n>` | Cap emitted frames per second (default `30`; `0` disables) |
+| `--max-fps <n>` | Cap emitted frames per second (default `60`; `0` disables) |
 | `--format <png\|jpeg>` | Screenshot format (default `jpeg`) |
-| `--quality <0-100>` | JPEG quality (default `60`) |
+| `--quality <0-100>` | JPEG quality (default `80`) |
 
 ### Finding Chrome targets
 
