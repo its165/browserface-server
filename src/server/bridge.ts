@@ -179,13 +179,14 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
     })();
 
     ws.on("message", (raw) => {
-      if (raw.length > 256 * 1024) {
+      const rawText = raw.toString();
+      if (Buffer.byteLength(rawText, "utf8") > 256 * 1024) {
         reject("message too large");
         return;
       }
       let value: unknown;
       try {
-        value = JSON.parse(raw.toString());
+        value = JSON.parse(rawText);
       } catch {
         reject("invalid json");
         return;
