@@ -63,15 +63,6 @@ export function setupTouch(opts: TouchOptions): void {
   let scrolling = false;
   let pendingTouch: Touch | null = null;
   let scrollFrame = 0;
-  let probeTimer: number | undefined;
-
-  function beginProbe() {
-    onProbeStart();
-    if (probeTimer !== undefined) window.clearTimeout(probeTimer);
-    probeTimer = window.setTimeout(() => {
-      probeTimer = undefined;
-    }, 500);
-  }
 
   function findChanged(touches: TouchList, id: number): Touch | null {
     for (let i = 0; i < touches.length; i++) {
@@ -106,7 +97,7 @@ export function setupTouch(opts: TouchOptions): void {
       // the result lands in time and the next tap on a field pops the
       // OS keyboard inside the gesture; worst case the user taps twice.
       const { x, y } = pointToViewport(t);
-      beginProbe();
+      onProbeStart();
       send({ type: "mousemove", x, y, buttons: [] });
     },
     { passive: true },
