@@ -276,7 +276,7 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
 
   // Binary frames are deliberately kept to roughly one frame in flight.
   // Queueing old images only increases latency, so stale frames are dropped.
-  const FRAME_BACKPRESSURE_BYTES = 192 * 1024;
+  const FRAME_BACKPRESSURE_MIN_BYTES = 512 * 1024;
 
   session.on("screenshot", (msg) => {
     const payload = encodeScreenshot(msg);
@@ -285,7 +285,8 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
       if (ws.readyState !== ws.OPEN) continue;
 
       // Drop stale frames instead of allowing latency to accumulate.
-      if (ws.bufferedAmount > FRAME_BACKPRESSURE_BYTES) continue;
+      const frameBackpressureBytes = Math.max(FRAME_BACKPRESSURE_MIN_BYTES, payload.byteLength * 2);
+      if (ws.bufferedAmount > frameBackpressureBytes) continue;
 
       ws.send(payload);
     }
