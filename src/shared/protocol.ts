@@ -324,3 +324,79 @@ export type ServerMessage =
   | FindResultMessage
   | AckMessage
   | ErrorMessage;
+
+
+const MAX_TEXT = 100_000;
+const MAX_ID = 256;
+const MAX_URL = 8_192;
+const MODIFIERS = new Set<ModifierKey>(["Alt", "Control", "Meta", "Shift"]);
+const BUTTONS = new Set<MouseButton>(["left", "middle", "right"]);
+
+function finiteNumber(v: unknown, min = -1e7, max = 1e7): v is number {
+  return typeof v === "number" && Number.isFinite(v) && v >= min && v <= max;
+}
+function boundedString(v: unknown, max: number): v is string {
+  return typeof v === "string" && v.length <= max;
+}
+function modifiers(v: unknown): v is ModifierKey[] {
+  return v === undefined || (Array.isArray(v) && v.length <= 4 && v.every(x => typeof x === "string" && MODIFIERS.has(x as ModifierKey)));
+}
+function mouseButtons(v: unknown): v is MouseButton[] {
+  return v === undefined || (Array.isArray(v) && v.length <= 3 && v.every(x => typeof x === "string" && BUTTONS.has(x as MouseButton)));
+}
+
+/** Runtime validation for untrusted WebSocket input. */
+export function isClientMessage(value: unknown): value is ClientMessage {
+  if (!value || typeof value !== "object") return false;
+  const m = value as Record<string, unknown>;
+  if (m.type === "hello") {
+    return boundedString(m.client, MAX_ID) && (m.role === "human" || m.role === "agent");
+  }
+  if (m.type !== "action" || !m.action || typeof m.action !== "object") return false;
+  if (m.id !== undefined && !boundedString(m.id, MAX_ID)) return false;
+  const a = m.action as Record<string, unknown>;
+  if (typeof a.type !== "string") return false;
+
+  switch (a.type) {
+    case "click":
+    case "mousedown":
+    case "mouseup":
+      return finiteNumber(a.x) && finiteNumber(a.y) &&
+        (a.button === undefined || BUTTONS.has(a.button as MouseButton)) &&
+        (a.clickCount === undefined || (Number.isInteger(a.clickCount) && a.clickCount >= 1 && a.clickCount <= 20)) &&
+        modifiers(a.modifiers);
+    case "mousemove":
+      return finiteNumber(a.x) && finiteNumber(a.y) && mouseButtons(a.buttons) && modifiers(a.modifiers);
+    case "scroll":
+      return finiteNumber(a.x) && finiteNumber(a.y) && finiteNumber(a.deltaX, -1e6, 1e6) && finiteNumber(a.deltaY, -1e6, 1e6);
+    case "type":
+      return boundedString(a.text, MAX_TEXT);
+    case "key":
+      return boundedString(a.key, 256) && (a.code === undefined || boundedString(a.code, 256)) &&
+        modifiers(a.modifiers) && (a.phase === "down" || a.phase === "up" || a.phase === "press");
+    case "navigate":
+      return boundedString(a.url, MAX_URL) && /^(https?|file|about|chrome):/i.test(a.url);
+    case "reload":
+      return a.ignoreCache === undefined || typeof a.ignoreCache === "boolean";
+    case "switchTab":
+    case "closeTab":
+      return boundedString(a.tabId, MAX_ID);
+    case "newTab":
+      return a.url === undefined || (boundedString(a.url, MAX_URL) && /^(https?|file|about|chrome):/i.test(a.url));
+    case "back":
+    case "forward":
+    case "refocus":
+    case "reviveTab":
+    case "mouseleave":
+    case "findStop":
+      return Object.keys(a).length === 1;
+    case "setViewport":
+      return finiteNumber(a.width, 200, 10000) && finiteNumber(a.height, 150, 10000);
+    case "find":
+      return boundedString(a.query, 10_000) && a.query.length > 0 &&
+        (a.direction === undefined || a.direction === "next" || a.direction === "prev") &&
+        (a.fromStart === undefined || typeof a.fromStart === "boolean");
+    default:
+      return false;
+  }
+}
