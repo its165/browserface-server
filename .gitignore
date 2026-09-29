@@ -5,3 +5,5 @@ dist/
 *.log
 .browserface/
 .DS_Store
+*.tsbuildinfo
+*.bak-*
