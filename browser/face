@@ -31,9 +31,9 @@ Bridge flags:
   --listen-port <port>     HTTP/WS bind port (default 8768)
   --width <px>             Override viewport width
   --height <px>            Override viewport height
-  --max-fps <n>            Cap emitted frames/sec (default 30; 0 disables)
+  --max-fps <n>            Cap emitted frames/sec (default 60; 0 disables)
   --format <png|jpeg>      Screenshot format (default jpeg)
-  --quality <0-100>        JPEG quality (default 60)
+  --quality <0-100>        JPEG quality (default 80)
 EOF
 }
 

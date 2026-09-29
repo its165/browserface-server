@@ -94,7 +94,7 @@ async function main() {
   // many SPAs) would otherwise spam every connected client with frames the
   // user can't perceive — 30 fps is plenty smooth. Pass --max-fps 0 to
   // disable. Pass --max-fps <n> to override.
-  opts.maxFps = args.maxFps !== undefined ? args.maxFps : 30;
+  opts.maxFps = args.maxFps !== undefined ? args.maxFps : 60;
   if (args.format) opts.screenshotFormat = args.format;
   if (args.quality !== undefined) opts.screenshotQuality = args.quality;
   if (args.width && args.height) {

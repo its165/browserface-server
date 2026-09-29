@@ -62,7 +62,7 @@ export function createBridge(opts: BridgeOptions): BridgeClient {
 
           if (bytes.byteLength < 12) return;
 
-            const magic = String.fromCharCode(...Array.from(bytes.subarray(0, 4)));
+            const magic = String.fromCharCode(bytes[0]!, bytes[1]!, bytes[2]!, bytes[3]!);
 
           if (magic !== "BFR1") return;
 

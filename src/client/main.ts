@@ -141,7 +141,7 @@ function handleServerMessage(msg: ServerMessage) {
         els.screen.src = `data:${mime};base64,${msg.data}`;
       } else {
         const nextUrl = URL.createObjectURL(
-          new Blob([msg.data], { type: mime }),
+          new Blob([new Uint8Array(msg.data)], { type: mime }),
         );
         const previousUrl = els.screen.dataset.blobUrl;
         els.screen.src = nextUrl;
