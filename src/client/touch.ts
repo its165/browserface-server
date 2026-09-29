@@ -186,5 +186,10 @@ export function setupTouch(opts: TouchOptions): void {
   frame.addEventListener("touchcancel", () => {
     activeId = null;
     scrolling = false;
+    pendingTouch = null;
+    if (scrollFrame) {
+      cancelAnimationFrame(scrollFrame);
+      scrollFrame = 0;
+    }
   });
 }

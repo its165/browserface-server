@@ -22,7 +22,12 @@ html,
 body {
   margin: 0;
   padding: 0;
+  width: 100%;
   height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--bg);
   color: var(--fg);
   font-family:
@@ -788,7 +793,7 @@ body.out-of-focus .frame {
    on focus (clipped 0×0 inputs are ignored for keyboard purposes). */
 .paste-helper {
   position: fixed;
-  bottom: 0;
+  top: 0;
   left: 0;
   width: 1px;
   height: 1px;
@@ -1009,8 +1014,34 @@ body.dragging-sidebar .toolbar {
      keyboard surfaces from a real user action (browsers reject keyboard
      pop from non-gesture focus calls). */
   .paste-helper {
+    top: max(0px, env(safe-area-inset-top));
+    bottom: auto;
     clip: auto;
     opacity: 0;
+    z-index: 1;
+    transform: translateZ(0);
+  }
+
+  /*
+   * The on-screen keyboard must not make the bridge page itself scroll or
+   * pan to the hidden input. The layout viewport is resized via
+   * interactive-widget=resizes-content; keeping the app fixed makes the
+   * visible viewport the only source of truth for frame geometry.
+   */
+  html,
+  body {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100dvh;
+    max-height: 100dvh;
+    overflow: hidden;
+  }
+
+  .main-col,
+  .stage {
+    min-width: 0;
+    min-height: 0;
   }
 }
 

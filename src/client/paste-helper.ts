@@ -279,16 +279,14 @@ export function setupPasteHelper(opts: PasteHelperOptions): PasteHelper {
     }
   });
 
-  // In field mode, observe local edits and forward them to the remote so the
-  // remote text input ends up with the same content. We don't preventDefault
-  // the underlying keystroke — that gives the user immediate visual feedback
-  // in the helper. The mirror update from the server confirms (and overrides
-  // if the remote diverged, e.g. maxlength clamp). In selection mode the
-  // helper isn't editable conceptually, so we ignore input events; any
-  // accidental local mutation is reverted by the selectionchange handler's
-  // applyState() snap-back.
+  // Forward soft-keyboard text as soon as it arrives. On mobile the helper
+  // can receive the first IME/input event before the asynchronous selection
+  // probe has told us that the remote target is an editable field. Waiting
+  // for state.field here makes the first characters disappear ("typing in
+  // the air"). Character input is safe to forward in either mode because the
+  // remote click already established the intended target; field mirroring
+  // then catches up and becomes authoritative.
   el.addEventListener("input", (e) => {
-    if (!state.field) return;
     const ie = e as InputEvent;
     const inputType = ie.inputType;
     if (inputType === "insertFromPaste") return; // handled by paste listener
