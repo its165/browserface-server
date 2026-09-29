@@ -94,7 +94,13 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
     // Reject oversized control messages before JSON parsing. Screenshot frames
     // are server-to-client and are not affected by this limit.
     maxPayload: 256 * 1024,
-    verifyClient: ({ origin }) => !origin || allowedOrigins.size === 0 || allowedOrigins.has(origin),
+    verifyClient: ({ origin, req }) => {
+      if (!origin) return true;
+      if (allowedOrigins.has(origin)) return true;
+      const host = req.headers.host;
+      if (!host) return false;
+      return origin === `http://${host}` || origin === `https://${host}`;
+    },
   });
 
   // Binary screenshot packet:
