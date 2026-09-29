@@ -21,6 +21,9 @@ const els = {
   urlForm: document.getElementById("url-form") as HTMLFormElement,
   url: document.getElementById("url") as HTMLInputElement,
   openExternal: document.getElementById("open-external") as HTMLButtonElement,
+  focusMode: document.getElementById("focus-mode") as HTMLButtonElement,
+  fullscreen: document.getElementById("fullscreen") as HTMLButtonElement,
+  focusExit: document.getElementById("focus-exit") as HTMLButtonElement,
   status: document.getElementById("status") as HTMLSpanElement,
   loadingIndicator: document.getElementById("loading-indicator") as HTMLSpanElement,
   fps: document.getElementById("fps") as HTMLSpanElement,
@@ -72,6 +75,28 @@ let lastCursorEditable = false;
 // out to be on a non-editable. Net: every field works first-tap;
 // non-editable taps only flash when the probe is unusually slow.
 let probeInFlight = false;
+
+// Keep only the newest incoming frame until the next paint. At 60 FPS this
+// prevents screenshot packets from monopolizing the local main thread.
+let pendingFrameUrl: string | null = null;
+let frameRenderScheduled = false;
+function scheduleFrameRender(url: string) {
+  if (pendingFrameUrl) URL.revokeObjectURL(pendingFrameUrl);
+  pendingFrameUrl = url;
+  if (frameRenderScheduled) return;
+  frameRenderScheduled = true;
+  requestAnimationFrame(() => {
+    frameRenderScheduled = false;
+    const next = pendingFrameUrl;
+    pendingFrameUrl = null;
+    if (!next) return;
+    const previous = els.screen.dataset.blobUrl;
+    els.screen.src = next;
+    els.screen.dataset.blobUrl = next;
+    if (previous) URL.revokeObjectURL(previous);
+  });
+}
+
 const isCoarsePointer =
   typeof window.matchMedia === "function" && window.matchMedia("(pointer: coarse)").matches;
 
@@ -135,21 +160,15 @@ function handleServerMessage(msg: ServerMessage) {
       };
       const mime = msg.format === "png" ? "image/png" : "image/jpeg";
 
-      // Binary WebSocket frames arrive as ArrayBuffer. Keep a Blob URL
-      // instead of constructing a large base64 data URL on every frame.
+      // Coalesce binary frames to the next paint; stale frames are
+      // disposable and should never build local decode/render pressure.
       if (typeof msg.data === "string") {
-        els.screen.src = `data:${mime};base64,${msg.data}`;
+        els.screen.src = "data:" + mime + ";base64," + msg.data;
       } else {
         const nextUrl = URL.createObjectURL(
           new Blob([new Uint8Array(msg.data)], { type: mime }),
         );
-        const previousUrl = els.screen.dataset.blobUrl;
-        els.screen.src = nextUrl;
-        els.screen.dataset.blobUrl = nextUrl;
-
-        if (previousUrl) {
-          URL.revokeObjectURL(previousUrl);
-        }
+        scheduleFrameRender(nextUrl);
       }
 
       els.placeholder.classList.add("hidden");
@@ -285,6 +304,60 @@ const findBar = setupFindBar({
   onClose: refocusPasteHelper,
 });
 bridge.connect();
+
+// ── Immersive controls ───────────────────────────────────────────────────────
+const FOCUS_KEY = "browserface:focus";
+let focusMode = localStorage.getItem(FOCUS_KEY) === "1";
+function applyFocusMode(enabled: boolean) {
+  focusMode = enabled;
+  document.body.classList.toggle("focus-mode", enabled);
+  els.focusMode.setAttribute("aria-pressed", String(enabled));
+  els.focusMode.title = enabled ? "Exit focus mode (Ctrl+Shift+F)" : "Focus mode (Ctrl+Shift+F)";
+  els.focusExit.hidden = !enabled;
+  localStorage.setItem(FOCUS_KEY, enabled ? "1" : "0");
+  requestAnimationFrame(() => fitFrame());
+}
+function toggleFocusMode() { applyFocusMode(!focusMode); }
+applyFocusMode(focusMode);
+els.focusMode.addEventListener("click", toggleFocusMode);
+els.focusExit.addEventListener("click", () => applyFocusMode(false));
+
+function updateFullscreenUi() {
+  const active = !!document.fullscreenElement;
+  els.fullscreen.setAttribute("aria-pressed", String(active));
+  els.fullscreen.title = active ? "Exit fullscreen (F11)" : "Fullscreen (F11)";
+}
+async function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen();
+  } catch {
+    showToast("Fullscreen is not available in this browser");
+  }
+}
+els.fullscreen.addEventListener("click", () => void toggleFullscreen());
+document.addEventListener("fullscreenchange", () => {
+  updateFullscreenUi();
+  requestAnimationFrame(() => fitFrame());
+});
+updateFullscreenUi();
+
+window.addEventListener("keydown", (e) => {
+  const modifier = e.ctrlKey || e.metaKey;
+  if (e.key === "F11") {
+    e.preventDefault();
+    void toggleFullscreen();
+    return;
+  }
+  if (modifier && e.shiftKey && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    toggleFocusMode();
+    return;
+  }
+  if (e.key === "Escape" && focusMode && !document.fullscreenElement) {
+    applyFocusMode(false);
+  }
+});
 
 // ── Suppress Safari's swipe-to-navigate at the tab strip's edges ─────────
 // CSS overscroll-behavior on html/body isn't honored by Safari for the

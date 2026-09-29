@@ -1065,3 +1065,83 @@ textarea {
   -webkit-user-select: text;
   user-select: text;
 }
+
+
+/* ── Immersive focus mode ──────────────────────────────────────────────────── */
+body.focus-mode .tabs,
+body.focus-mode .toolbar,
+body.focus-mode .statusbar,
+body.focus-mode .orient-toggle,
+body.focus-mode .tab-sidebar,
+body.focus-mode .sidebar-resize {
+  display: none !important;
+}
+
+body.focus-mode .main-col {
+  position: fixed;
+  inset: 0;
+}
+
+body.focus-mode .stage {
+  width: 100%;
+  height: 100%;
+}
+
+body.focus-mode .frame {
+  max-width: 100vw;
+  max-height: 100vh;
+}
+
+@media (pointer: coarse) {
+  #focus-mode,
+  #fullscreen {
+    width: 36px;
+    height: 36px;
+  }
+
+  body.focus-mode .frame {
+    max-width: 100vw;
+    max-height: 100dvh;
+  }
+}
+
+
+/* Floating escape hatch for immersive mode. The bridge chrome disappears in
+   focus mode, so mobile users get a thumb-reachable exit without relying on
+   a hardware Escape key or remembering a shortcut. */
+.focus-exit {
+  position: fixed;
+  top: max(12px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 200;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 12px;
+  background: rgba(12,15,20,0.72);
+  color: var(--fg);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.28);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(-4px);
+  pointer-events: none;
+  transition: opacity 140ms ease, transform 140ms ease, background 140ms ease;
+}
+
+.focus-exit[hidden] { display: none; }
+body.focus-mode .focus-exit {
+  opacity: 0.78;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+body.focus-mode .focus-exit:hover,
+body.focus-mode .focus-exit:active {
+  opacity: 1;
+  background: rgba(12,15,20,0.9);
+}
