@@ -63,6 +63,45 @@ export function setupTouch(opts: TouchOptions): void {
   let scrolling = false;
   let pendingTouch: Touch | null = null;
   let scrollFrame = 0;
+  let momentumFrame = 0;
+  let velocityX = 0;
+  let velocityY = 0;
+  let lastMoveTime = 0;
+
+  function cancelMomentum() {
+    if (momentumFrame) {
+      cancelAnimationFrame(momentumFrame);
+      momentumFrame = 0;
+    }
+    velocityX = 0;
+    velocityY = 0;
+  }
+
+  function runMomentum() {
+    const speed = Math.hypot(velocityX, velocityY);
+    if (speed < 0.35) {
+      cancelMomentum();
+      return;
+    }
+
+    const scale = getRemoteToLocalScale();
+    const rect = frame.getBoundingClientRect();
+    const { x, y } = pointToViewport({
+      clientX: rect.left + rect.width / 2,
+      clientY: rect.top + rect.height / 2,
+    });
+    send({
+      type: "scroll",
+      x,
+      y,
+      deltaX: velocityX * scale,
+      deltaY: velocityY * scale,
+    });
+
+    velocityX *= 0.90;
+    velocityY *= 0.90;
+    momentumFrame = requestAnimationFrame(runMomentum);
+  }
 
   function findChanged(touches: TouchList, id: number): Touch | null {
     for (let i = 0; i < touches.length; i++) {
@@ -87,6 +126,7 @@ export function setupTouch(opts: TouchOptions): void {
       startX = lastX = t.clientX;
       startY = lastY = t.clientY;
       scrolling = false;
+      cancelMomentum();
       // Probe the cursor at the tap location so the touchend handler has
       // a chance to know whether the tap landed on an editable target.
       // Mobile doesn't fire mousemove on its own — without this dispatch
@@ -117,6 +157,7 @@ export function setupTouch(opts: TouchOptions): void {
       if (!t) return;
       const dx = t.clientX - lastX;
       const dy = t.clientY - lastY;
+      const now = performance.now();
       const totalDist = Math.hypot(t.clientX - startX, t.clientY - startY);
       if (!scrolling && totalDist > TAP_THRESHOLD_PX) scrolling = true;        if (scrolling) {
           pendingTouch = t;
@@ -134,6 +175,13 @@ export function setupTouch(opts: TouchOptions): void {
               const dy = current.clientY - lastY;
 
               if (dx === 0 && dy === 0) return;
+
+              const dt = Math.max(8, now - lastMoveTime);
+              const instantVX = (current.clientX - lastX) / dt;
+              const instantVY = (current.clientY - lastY) / dt;
+              velocityX = velocityX * 0.65 + instantVX * 0.35;
+              velocityY = velocityY * 0.65 + instantVY * 0.35;
+              lastMoveTime = now;
 
               const scale = getRemoteToLocalScale();
               const { x, y } = pointToViewport(current);
@@ -175,10 +223,17 @@ export function setupTouch(opts: TouchOptions): void {
       // later is silently rejected for keyboard purposes — that's why
       // the focus call has to be invoked from here rather than from
       // the selection-message handler.
-      const { x, y } = pointToViewport({ clientX: startX, clientY: startY });
+      if (scrolling) {
+        // Continue a fast swipe with short client-side inertial scroll. This
+        // keeps the gesture feeling native without changing the wire
+        // protocol or asking the remote page to synthesize momentum.
+        momentumFrame = requestAnimationFrame(runMomentum);
+      } else {
+        const { x, y } = pointToViewport({ clientX: startX, clientY: startY });
       send({ type: "mousedown", x, y, button: "left", clickCount: 1 });
-      send({ type: "mouseup", x, y, button: "left", clickCount: 1 });
-      focusPasteHelperOnTap();
+        send({ type: "mouseup", x, y, button: "left", clickCount: 1 });
+        focusPasteHelperOnTap();
+      }
     }
     scrolling = false;
   });
@@ -191,5 +246,6 @@ export function setupTouch(opts: TouchOptions): void {
       cancelAnimationFrame(scrollFrame);
       scrollFrame = 0;
     }
+    cancelMomentum();
   });
 }
