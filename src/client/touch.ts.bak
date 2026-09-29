@@ -61,8 +61,6 @@ export function setupTouch(opts: TouchOptions): void {
   let lastX = 0;
   let lastY = 0;
   let scrolling = false;
-  let pendingTouch: Touch | null = null;
-  let scrollFrame = 0;
 
   function findChanged(touches: TouchList, id: number): Touch | null {
     for (let i = 0; i < touches.length; i++) {
@@ -118,41 +116,29 @@ export function setupTouch(opts: TouchOptions): void {
       const dx = t.clientX - lastX;
       const dy = t.clientY - lastY;
       const totalDist = Math.hypot(t.clientX - startX, t.clientY - startY);
-      if (!scrolling && totalDist > TAP_THRESHOLD_PX) scrolling = true;        if (scrolling) {
-          pendingTouch = t;
-
-          if (!scrollFrame) {
-            scrollFrame = requestAnimationFrame(() => {
-              scrollFrame = 0;
-
-              if (!pendingTouch || activeId === null || !scrolling) return;
-
-              const current = pendingTouch;
-              pendingTouch = null;
-
-              const dx = current.clientX - lastX;
-              const dy = current.clientY - lastY;
-
-              if (dx === 0 && dy === 0) return;
-
-              const scale = getRemoteToLocalScale();
-              const { x, y } = pointToViewport(current);
-
-              send({
-                type: "scroll",
-                x,
-                y,
-                deltaX: -dx * scale,
-                deltaY: -dy * scale,
-              });
-
-              lastX = current.clientX;
-              lastY = current.clientY;
-            });
-          }
-
-          e.preventDefault();
-        }
+      if (!scrolling && totalDist > TAP_THRESHOLD_PX) scrolling = true;
+      if (scrolling) {
+        // Drag finger up → page scrolls down (deltaY positive). Same sign
+        // convention as wheel events on desktop. Scale by remote/local
+        // ratio so a drag in the bridge UI moves the remote page by an
+        // equivalent amount in remote coords.
+        const scale = getRemoteToLocalScale();
+        const { x, y } = pointToViewport(t);
+        send({
+          type: "scroll",
+          x,
+          y,
+          deltaX: -dx * scale,
+          deltaY: -dy * scale,
+        });
+        lastX = t.clientX;
+        lastY = t.clientY;
+        // Suppress whatever default the browser would have done with a
+        // single-finger drag (e.g. iOS rubber-band, pull-to-refresh).
+        // touch-action on the frame already handles most of this; this
+        // is belt-and-suspenders for browsers that ignore touch-action.
+        e.preventDefault();
+      }
     },
     { passive: false },
   );

@@ -185,9 +185,8 @@ export type ClientMessage = ClientHelloMessage | ClientActionMessage;
 
 export interface ScreenshotMessage {
   type: "screenshot";
-  // Binary image bytes when received by the browserface client.
-  // The server-side CDP session still receives Chrome's base64 payload.
-  data: ArrayBuffer | string;
+  // Base64-encoded PNG/JPEG.
+  data: string;
   format: "png" | "jpeg";
   width: number;
   height: number;

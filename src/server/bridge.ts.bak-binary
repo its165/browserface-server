@@ -86,40 +86,6 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
 
   const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
 
-  // Binary screenshot packet:
-  // [4 bytes magic "BFR1"]
-  // [4 bytes metadata JSON length, big-endian]
-  // [N bytes UTF-8 JSON metadata]
-  // [raw JPEG/PNG bytes]
-  //
-  // Control/state messages remain normal JSON WebSocket messages.
-  // This removes the large base64+JSON copy on every video frame.
-  const encodeScreenshot = (msg: Extract<ServerMessage, { type: "screenshot" }>): Buffer => {
-    if (typeof msg.data !== "string") {
-      throw new Error("server screenshot payload must be base64 string");
-    }
-    const image = Buffer.from(msg.data, "base64");
-    const meta = Buffer.from(
-      JSON.stringify({
-        type: "screenshot",
-        format: msg.format,
-        width: msg.width,
-        height: msg.height,
-        deviceScaleFactor: msg.deviceScaleFactor,
-        frame: msg.frame,
-        capturedAt: msg.capturedAt,
-      }),
-      "utf8",
-    );
-
-    const packet = Buffer.allocUnsafe(12 + meta.length + image.length);
-    packet.write("BFR1", 0, 4, "ascii");
-    packet.writeUInt32BE(meta.length, 4);
-    meta.copy(packet, 8);
-    image.copy(packet, 8 + meta.length);
-    return packet;
-  };
-
   wss.on("connection", (ws) => {
     clients.add(ws);
 
@@ -153,9 +119,7 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
       // Seed the UI with a current frame so it doesn't sit on the "Waiting for
       // first frame…" placeholder until the page happens to paint something.
       const frame = await session.captureCurrentFrame();
-      if (frame && ws.readyState === ws.OPEN) {
-        ws.send(encodeScreenshot(frame));
-      }
+      if (frame) send(frame);
     })();
 
     ws.on("message", async (raw) => {
@@ -196,19 +160,18 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
     }
   };
 
-  // Binary frames are deliberately kept to roughly one frame in flight.
-  // Queueing old images only increases latency, so stale frames are dropped.
-  const FRAME_BACKPRESSURE_BYTES = 192 * 1024;
-
+  // Per-client backpressure for screencast frames: if a client's outgoing
+  // socket buffer hasn't drained the previous frame yet, drop the new one
+  // for that client. A typical JPEG frame is ~80–250 KB after base64+JSON,
+  // so 256 KB ≈ "one frame still in flight" — at that point queueing more
+  // just grows latency. Other event types (page state, hover, tabs, etc.)
+  // are tiny and always go through.
+  const FRAME_BACKPRESSURE_BYTES = 256 * 1024;
   session.on("screenshot", (msg) => {
-    const payload = encodeScreenshot(msg);
-
+    const payload = JSON.stringify(msg);
     for (const ws of clients) {
       if (ws.readyState !== ws.OPEN) continue;
-
-      // Drop stale frames instead of allowing latency to accumulate.
       if (ws.bufferedAmount > FRAME_BACKPRESSURE_BYTES) continue;
-
       ws.send(payload);
     }
   });

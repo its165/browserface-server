@@ -123,40 +123,18 @@ function handleServerMessage(msg: ServerMessage) {
       fitFrame();
       return;
     case "screenshot": {
-      const viewportChanged =
-        viewport.width !== msg.width ||
-        viewport.height !== msg.height ||
-        viewport.deviceScaleFactor !== msg.deviceScaleFactor;
-
       viewport = {
         width: msg.width,
         height: msg.height,
         deviceScaleFactor: msg.deviceScaleFactor,
       };
       const mime = msg.format === "png" ? "image/png" : "image/jpeg";
-
-      // Binary WebSocket frames arrive as ArrayBuffer. Keep a Blob URL
-      // instead of constructing a large base64 data URL on every frame.
-      if (typeof msg.data === "string") {
-        els.screen.src = `data:${mime};base64,${msg.data}`;
-      } else {
-        const nextUrl = URL.createObjectURL(
-          new Blob([msg.data], { type: mime }),
-        );
-        const previousUrl = els.screen.dataset.blobUrl;
-        els.screen.src = nextUrl;
-        els.screen.dataset.blobUrl = nextUrl;
-
-        if (previousUrl) {
-          URL.revokeObjectURL(previousUrl);
-        }
-      }
-
+      els.screen.src = `data:${mime};base64,${msg.data}`;
       els.placeholder.classList.add("hidden");
       // If frames are arriving, the tab is alive — clear any stale inactive prompt.
       tabs.hideInactive();
       statusBar.recordFrame();
-      if (viewportChanged) fitFrame();
+      fitFrame();
       return;
     }
     case "page":
@@ -455,40 +433,8 @@ function showToast(message: string, durationMs = 4000) {
 
 // ── Layout ───────────────────────────────────────────────────────────────────
 
-let keyboardOpen = false;
-let lastViewportHeight = window.visualViewport?.height ?? window.innerHeight;
-
-function handleVisualViewport() {
-  const vv = window.visualViewport;
-  if (!vv) return;
-
-  const currentHeight = vv.height;
-  const heightDelta = lastViewportHeight - currentHeight;
-
-  // A large visual-viewport height loss on a narrow screen is normally
-  // the on-screen keyboard opening. Do not refit the remote frame here:
-  // refitting changes its geometry while the user is typing and causes
-  // the remote page to jump out of view.
-  if (window.innerWidth < MOBILE_BP && heightDelta > 120) {
-    keyboardOpen = true;
-  } else if (window.innerWidth < MOBILE_BP && heightDelta < -80) {
-    keyboardOpen = false;
-  }
-
-  lastViewportHeight = currentHeight;
-
-  if (!keyboardOpen) {
-    fitFrame();
-  }
-}
-
-window.addEventListener("resize", () => {
-  if (!keyboardOpen) fitFrame();
-});
-
-if (window.visualViewport) {
-  window.visualViewport.addEventListener("resize", handleVisualViewport);
-}
+window.addEventListener("resize", fitFrame);
+new ResizeObserver(fitFrame).observe(els.stage);
 
 // ── Mouse / scroll ───────────────────────────────────────────────────────────
 

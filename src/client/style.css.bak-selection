@@ -1013,24 +1013,3 @@ body.dragging-sidebar .toolbar {
     opacity: 0;
   }
 }
-
-/* Prevent accidental text selection in the Browserface viewer UI.
-   Selection inside the remote browser frame is unaffected. */
-body,
-#app,
-.toolbar,
-.tabs,
-.statusbar,
-button,
-input,
-select {
-  -webkit-user-select: none;
-  user-select: none;
-  -webkit-touch-callout: none;
-}
-
-input,
-textarea {
-  -webkit-user-select: text;
-  user-select: text;
-}
