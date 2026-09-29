@@ -80,6 +80,14 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
   const clients = new Set<WebSocket>();
 
   const httpServer = createServer((req, res) => {
+    if ((req.url?.split("?")[0] ?? "/") === "/healthz") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      res.setHeader("cache-control", "no-store");
+      res.setHeader("x-content-type-options", "nosniff");
+      res.end(JSON.stringify({ status: "ok", service: "browserface" }));
+      return;
+    }
     handleStatic(req, res, staticDir).catch((err) => {
       console.error("[browserface] static error:", err);
       res.statusCode = 500;
@@ -317,9 +325,10 @@ async function handleStatic(req: IncomingMessage, res: ServerResponse, root: str
   // Strip query/hash, default to index.html.
   const pathname = url.split("?")[0]?.split("#")[0] ?? "/";
   const requested = pathname === "/" ? "/index.html" : pathname;
-  const safe = normalize(requested).replace(/^([./\\]+)/, "/");
-  const filePath = join(root, safe);
-  if (!filePath.startsWith(root)) {
+  const safe = normalize(requested);
+  const rootPath = resolve(root);
+  const filePath = resolve(rootPath, "." + safe);
+  if (filePath !== rootPath && !filePath.startsWith(rootPath + "/")) {
     res.statusCode = 403;
     res.end("forbidden");
     return;
@@ -330,6 +339,8 @@ async function handleStatic(req: IncomingMessage, res: ServerResponse, root: str
     res.statusCode = 200;
     res.setHeader("content-type", mime);
     res.setHeader("cache-control", "no-store");
+    res.setHeader("x-content-type-options", "nosniff");
+    res.setHeader("referrer-policy", "no-referrer");
     res.end(data);
   } catch {
     res.statusCode = 404;
