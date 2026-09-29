@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { ClientMessage, ServerMessage } from "../shared/protocol.js";
+import { isClientMessage, type ClientMessage, type ServerMessage } from "../shared/protocol.js";
 import { BrowserSession, type BrowserSessionOptions } from "./cdp-session.js";
 import { discoverChrome, findAgentProfile } from "./discover.js";
 
@@ -20,6 +20,9 @@ export interface BridgeOptions extends BrowserSessionOptions {
   // path against the user's own Chrome instead. (To skip discovery
   // entirely, just pass an explicit `target` or `host`+`port`.)
   discoverUserChrome?: boolean;
+  // Optional cross-origin allowlist for embedded deployments. Same-origin and
+  // requests without an Origin header remain allowed by default.
+  allowedOrigins?: string[];
 }
 
 const MIME: Record<string, string> = {
@@ -84,7 +87,21 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
     });
   });
 
-  const wss = new WebSocketServer({ server: httpServer, path: "/ws" });
+  const allowedOrigins = new Set(opts.allowedOrigins ?? []);
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: "/ws",
+    // Reject oversized control messages before JSON parsing. Screenshot frames
+    // are server-to-client and are not affected by this limit.
+    maxPayload: 256 * 1024,
+    verifyClient: ({ origin, req }) => {
+      if (!origin) return true;
+      if (allowedOrigins.has(origin)) return true;
+      const host = req.headers.host;
+      if (!host) return false;
+      return origin === `http://${host}` || origin === `https://${host}`;
+    },
+  });
 
   // Binary screenshot packet:
   // [4 bytes magic "BFR1"]
@@ -120,8 +137,18 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
     return packet;
   };
 
-  wss.on("connection", (ws) => {
+  wss.on("connection", (ws, req) => {
     clients.add(ws);
+    const remote = req.socket.remoteAddress ?? "unknown";
+    let helloReceived = false;
+    let actionWindowStart = Date.now();
+    let actionCount = 0;
+    let pendingActions = 0;
+    let queue = Promise.resolve();
+
+    const reject = (message: string) => {
+      try { ws.send(JSON.stringify({ type: "error", message })); } catch {}
+    };
 
     const send = (msg: ServerMessage) => {
       if (ws.readyState === ws.OPEN) {
@@ -158,18 +185,55 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
       }
     })();
 
-    ws.on("message", async (raw) => {
-      let msg: ClientMessage;
-      try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        send({ type: "error", message: "invalid json" });
+    ws.on("message", (raw) => {
+      const rawText = raw.toString();
+      if (Buffer.byteLength(rawText, "utf8") > 256 * 1024) {
+        reject("message too large");
         return;
       }
-      if (msg.type === "hello") {
-        return; // we just accept it; no per-client state today
+      let value: unknown;
+      try {
+        value = JSON.parse(rawText);
+      } catch {
+        reject("invalid json");
+        return;
       }
-      if (msg.type === "action") {
+      if (!isClientMessage(value)) {
+        reject("invalid message");
+        return;
+      }
+      const msg: ClientMessage = value;
+      if (msg.type === "hello") {
+        helloReceived = true;
+        console.log(`[browserface] client connected from ${remote} as ${msg.role} (${msg.client})`);
+        return;
+      }
+      if (!helloReceived) {
+        reject("hello required");
+        ws.close(1008, "hello required");
+        return;
+      }
+
+      const now = Date.now();
+      if (now - actionWindowStart >= 1000) {
+        actionWindowStart = now;
+        actionCount = 0;
+      }
+      actionCount++;
+      if (actionCount > 240) {
+        reject("rate limit exceeded");
+        return;
+      }
+
+      if (pendingActions >= 32) {
+        // Mouse motion is disposable; dropping it is preferable to building
+        // latency. Other actions get an explicit backpressure error.
+        if (msg.action.type === "mousemove") return;
+        reject("action queue busy");
+        return;
+      }
+      pendingActions++;
+      queue = queue.then(async () => {
         try {
           await session.dispatch(msg.action);
           send({ type: "ack", id: msg.id });
@@ -179,13 +243,18 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
             id: msg.id,
             message: err instanceof Error ? err.message : String(err),
           });
+        } finally {
+          pendingActions--;
         }
-        return;
-      }
+      }).catch((err) => {
+        pendingActions--;
+        console.error("[browserface] client action queue error:", err);
+      });
     });
 
     ws.on("close", () => {
       clients.delete(ws);
+      console.log(`[browserface] client disconnected from ${remote}`);
     });
   });
 

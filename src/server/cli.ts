@@ -13,6 +13,7 @@ interface CliArgs {
   format?: "png" | "jpeg";
   quality?: number;
   discover?: boolean;
+  allowedOrigins?: string[];
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -60,6 +61,16 @@ function parseArgs(argv: string[]): CliArgs {
       case "--quality":
         out.quality = Number(next());
         break;
+      case "--allow-origin": {
+        const v = next();
+        if (!v) {
+          console.error("--allow-origin requires a value");
+          process.exit(2);
+        }
+        out.allowedOrigins ??= [];
+        out.allowedOrigins.push(v);
+        break;
+      }
       case "--discover":
         out.discover = true;
         break;
@@ -90,6 +101,7 @@ async function main() {
     opts.viewport = { width: args.width, height: args.height };
   }
   if (args.discover) opts.discoverUserChrome = true;
+  if (args.allowedOrigins?.length) opts.allowedOrigins = args.allowedOrigins;
 
   const handle = await startBridge(opts);
 

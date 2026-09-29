@@ -131,6 +131,7 @@ nor a Playwright cache is present.
 | `--port <port>` | CDP port |
 | `--listen-host <host>` | UI bind host (default `127.0.0.1`) |
 | `--listen-port <port>` | UI bind port (default `8768`) |
+| `--allow-origin <origin>` | Allow an additional WebSocket Origin; repeatable. Same-origin is allowed automatically |
 | `--width <px>` `--height <px>` | Override viewport via `Emulation.setDeviceMetricsOverride` |
 | `--max-fps <n>` | Cap emitted frames per second (default `30`; `0` disables) |
 | `--format <png\|jpeg>` | Screenshot format (default `jpeg`) |
@@ -159,7 +160,11 @@ browser/share --oauth google --oauth-allow-email you@example.com
 ```
 
 `browser/share` exposes the bridge over a public URL. See the script's
-header for available auth flags and the security caveat.
+header for available auth flags and the security caveat. The bridge itself also
+rejects cross-origin WebSocket handshakes by default, validates every incoming
+message, caps control-message size, rate-limits actions, and serializes actions
+per client so a burst cannot race browser state. Use `--allow-origin` only when
+an intentional cross-origin embed is required.
 
 To skip repeating auth flags on every invocation, save them once with
 `browser/config`:
