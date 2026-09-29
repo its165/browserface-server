@@ -143,6 +143,7 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
     let helloReceived = false;
     let actionWindowStart = Date.now();
     let actionCount = 0;
+    let pendingActions = 0;
     let queue = Promise.resolve();
 
     const reject = (message: string) => {
@@ -224,6 +225,14 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
         return;
       }
 
+      if (pendingActions >= 32) {
+        // Mouse motion is disposable; dropping it is preferable to building
+        // latency. Other actions get an explicit backpressure error.
+        if (msg.action.type === "mousemove") return;
+        reject("action queue busy");
+        return;
+      }
+      pendingActions++;
       queue = queue.then(async () => {
         try {
           await session.dispatch(msg.action);
@@ -234,8 +243,11 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
             id: msg.id,
             message: err instanceof Error ? err.message : String(err),
           });
+        } finally {
+          pendingActions--;
         }
       }).catch((err) => {
+        pendingActions--;
         console.error("[browserface] client action queue error:", err);
       });
     });
