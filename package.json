@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "chrome-remote-interface": "^0.33.3",
-    "ws": "^8.18.0"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/chrome-remote-interface": "^0.31.14",
@@ -36,5 +36,10 @@
   "files": [
     "dist",
     "README.md"
-  ]
+  ],
+  "overrides": {
+    "chrome-remote-interface": {
+      "ws": "^8.21.3"
+    }
+  }
 }
