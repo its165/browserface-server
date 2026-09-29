@@ -465,10 +465,6 @@ function handleVisualViewport() {
   const currentHeight = vv.height;
   const heightDelta = lastViewportHeight - currentHeight;
 
-  // A large visual-viewport height loss on a narrow screen is normally
-  // the on-screen keyboard opening. Do not refit the remote frame here:
-  // refitting changes its geometry while the user is typing and causes
-  // the remote page to jump out of view.
   if (window.innerWidth < MOBILE_BP && heightDelta > 120) {
     keyboardOpen = true;
   } else if (window.innerWidth < MOBILE_BP && heightDelta < -80) {
@@ -477,14 +473,24 @@ function handleVisualViewport() {
 
   lastViewportHeight = currentHeight;
 
-  if (!keyboardOpen) {
-    fitFrame();
-  }
+  // The keyboard changes the usable browser viewport. Refit on the next
+  // animation frame so the layout has settled before measuring the stage.
+  // This keeps the remote frame anchored and visible instead of letting the
+  // browser pan the whole bridge page around the focused helper.
+  requestAnimationFrame(() => fitFrame());
 }
 
 window.addEventListener("resize", () => {
-  if (!keyboardOpen) fitFrame();
+  requestAnimationFrame(() => fitFrame());
 });
+
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("scroll", () => {
+    // Some mobile browsers pan the visual viewport without a layout resize.
+    // Re-measure so the screencast remains aligned with the visible frame.
+    requestAnimationFrame(() => fitFrame());
+  });
+}
 
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", handleVisualViewport);
