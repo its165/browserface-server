@@ -363,7 +363,7 @@ export function isClientMessage(value: unknown): value is ClientMessage {
     case "mouseup":
       return finiteNumber(a.x) && finiteNumber(a.y) &&
         (a.button === undefined || BUTTONS.has(a.button as MouseButton)) &&
-        (a.clickCount === undefined || (Number.isInteger(a.clickCount) && a.clickCount >= 1 && a.clickCount <= 20)) &&
+        (a.clickCount === undefined || (typeof a.clickCount === "number" && Number.isInteger(a.clickCount) && a.clickCount >= 1 && a.clickCount <= 20)) &&
         modifiers(a.modifiers);
     case "mousemove":
       return finiteNumber(a.x) && finiteNumber(a.y) && mouseButtons(a.buttons) && modifiers(a.modifiers);
