@@ -1002,9 +1002,13 @@ export class BrowserSession extends EventEmitter {
       everyNthFrame?: number;
       maxWidth?: number;
       maxHeight?: number;
+      maxFramesInFlight?: number;
+      sendLastFrame?: boolean;
     } = { format };
     if (format === "jpeg") params.quality = this.opts.screenshotQuality ?? 60;
     params.everyNthFrame = this.computeEveryNthFrame();
+    params.maxFramesInFlight = 1;
+    params.sendLastFrame = true;
     try {
       await this.send("Page.startScreencast", params);
       this.screencasting = true;
