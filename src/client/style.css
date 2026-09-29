@@ -1065,3 +1065,42 @@ textarea {
   -webkit-user-select: text;
   user-select: text;
 }
+
+
+/* ── Immersive focus mode ──────────────────────────────────────────────────── */
+body.focus-mode .tabs,
+body.focus-mode .toolbar,
+body.focus-mode .statusbar,
+body.focus-mode .orient-toggle,
+body.focus-mode .tab-sidebar,
+body.focus-mode .sidebar-resize {
+  display: none !important;
+}
+
+body.focus-mode .main-col {
+  position: fixed;
+  inset: 0;
+}
+
+body.focus-mode .stage {
+  width: 100%;
+  height: 100%;
+}
+
+body.focus-mode .frame {
+  max-width: 100vw;
+  max-height: 100vh;
+}
+
+@media (pointer: coarse) {
+  #focus-mode,
+  #fullscreen {
+    width: 36px;
+    height: 36px;
+  }
+
+  body.focus-mode .frame {
+    max-width: 100vw;
+    max-height: 100dvh;
+  }
+}
