@@ -1,3 +1,5 @@
+[Reading 1367 lines from start (total: 1367 lines, 0 remaining)]
+
 import CDP from "chrome-remote-interface";
 import { EventEmitter } from "node:events";
 import type {
@@ -329,6 +331,11 @@ export class BrowserSession extends EventEmitter {
 
   constructor(private opts: BrowserSessionOptions = {}) {
     super();
+  }
+
+  async setDownloadPath(downloadPath: string): Promise<void> {
+    if (!this.client) throw new Error("browser session is not connected");
+    await this.client.Browser.setDownloadBehavior({ behavior: "allow", downloadPath });
   }
 
   async connect(): Promise<void> {
@@ -1360,3 +1367,5 @@ export class BrowserSession extends EventEmitter {
     this.targetId = null;
   }
 }
+
+[executed on device: ip-172-31-44-71 (13ee5edb-ae63-40e5-b176-f056db72d14f)]
