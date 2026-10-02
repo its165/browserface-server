@@ -1,11 +1,18 @@
+[Reading 721 lines from start (total: 721 lines, 0 remaining)]
+
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
+import { stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { isClientMessage, type ClientMessage, type ServerMessage } from "../shared/protocol.js";
 import { BrowserSession, type BrowserSessionOptions } from "./cdp-session.js";
 import { discoverChrome, findAgentProfile } from "./discover.js";
+import { DownloadManager } from "./download-manager.js";
+import { FileManager } from "./file-manager.js";
+import { WorkspaceManager } from "./workspace-manager.js";
+import { WorkspaceDataStore } from "./workspace-data.js";
 
 export interface BridgeOptions extends BrowserSessionOptions {
   // HTTP/WebSocket bind address.
@@ -36,6 +43,18 @@ const MIME: Record<string, string> = {
   ".ico": "image/x-icon",
   ".map": "application/json; charset=utf-8",
 };
+
+async function readRequestBody(req: IncomingMessage, maxBytes: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += part.length;
+    if (total > maxBytes) throw new Error("request too large");
+    chunks.push(part);
+  }
+  return Buffer.concat(chunks);
+}
 
 function defaultStaticDir(): string {
   // dist/server/bridge.js → ../client
@@ -73,14 +92,287 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
       );
     }
   }
-  const session = new BrowserSession(sessionOpts);
+  let session = new BrowserSession(sessionOpts);
   await session.connect();
+  const workspaces = new WorkspaceManager();
+  await workspaces.init();
+  const workspaceData = new WorkspaceDataStore();
+  const dataRoot = process.env.BROWSERFACE_DATA_ROOT ?? "/mnt/scratch/Browserface";
+  const downloads = new DownloadManager(join(dataRoot, "Downloads"));
+  await downloads.init();
+  const files = new FileManager(dataRoot);
+  await files.init();
+  await session.setDownloadPath(downloads.completed);
 
   const staticDir = opts.staticDir ?? defaultStaticDir();
   const clients = new Set<WebSocket>();
+  let activeWorkspaceId = "main";
 
-  const httpServer = createServer((req, res) => {
-    if ((req.url?.split("?")[0] ?? "/") === "/healthz") {
+  const httpServer = createServer(async (req, res) => {
+    const pathname = req.url?.split("?")[0] ?? "/";
+    if (pathname === "/library" && req.method === "GET") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      res.setHeader("cache-control", "no-store");
+      res.end(JSON.stringify(await workspaceData.get(activeWorkspaceId)));
+      return;
+    }
+    if (pathname === "/bookmarks" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req, 32 * 1024);
+        const value = JSON.parse(body.toString("utf8")) as { url?: string; title?: string };
+        if (!value.url || !/^https?:\/\//i.test(value.url)) throw new Error("valid http(s) url required");
+        const url = value.url;
+        const title = value.title?.trim() || url;
+        const data = await workspaceData.update(activeWorkspaceId, (d) => {
+          const old = d.bookmarks.find((x) => x.url === url);
+          if (old) { old.title = title; return; }
+          d.bookmarks.unshift({ id: Date.now().toString(36), url, title, createdAt: Date.now() });
+          d.bookmarks = d.bookmarks.slice(0, 500);
+        });
+        res.statusCode = 201;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.end(JSON.stringify(data.bookmarks[0]));
+      } catch (err) { res.statusCode = 400; res.end(err instanceof Error ? err.message : "bad request"); }
+      return;
+    }
+    if (pathname === "/bookmarks" && req.method === "DELETE") {
+      const url = new URL(req.url ?? "/", "http://browserface").searchParams.get("url");
+      if (!url) { res.statusCode = 400; res.end("url required"); return; }
+      await workspaceData.update(activeWorkspaceId, (d) => { d.bookmarks = d.bookmarks.filter((x) => x.url !== url); });
+      res.statusCode = 204; res.end(); return;
+    }
+    if (pathname === "/session/save" && req.method === "POST") {
+      await workspaceData.update(activeWorkspaceId, (d) => {
+        d.sessionTabs = session.getTabs().filter((x) => /^https?:\/\//i.test(x.url)).map((x) => ({ title: x.title, url: x.url }));
+      });
+      res.statusCode = 204; res.end(); return;
+    }
+    if (pathname === "/session/restore" && req.method === "POST") {
+      const data = await workspaceData.get(activeWorkspaceId);
+      const saved = data.sessionTabs.filter((x) => /^https?:\/\//i.test(x.url));
+      if (!saved.length) { res.statusCode = 404; res.end("no saved session"); return; }
+      const replace = new URL(req.url ?? "/", "http://browserface").searchParams.get("replace") === "1";
+      if (replace) {
+        for (const tab of session.getTabs()) await session.closeTab(tab.id).catch(() => {});
+      }
+      for (const tab of saved) await session.newTab(tab.url);
+      res.statusCode = 204; res.end(); return;
+    }
+    if (pathname === "/session/reopen" && req.method === "POST") {
+      const data = await workspaceData.get(activeWorkspaceId);
+      const closed = data.closedTabs[0];
+      if (!closed) { res.statusCode = 404; res.end("no closed tab"); return; }
+      await session.newTab(closed.url);
+      await workspaceData.update(activeWorkspaceId, (d) => { d.closedTabs = d.closedTabs.slice(1); });
+      res.statusCode = 204; res.end(); return;
+    }
+    if (pathname === "/groups" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req, 16 * 1024);
+        const value = JSON.parse(body.toString("utf8")) as { name?: string };
+        const name = value.name?.trim().slice(0, 64);
+        if (!name) throw new Error("group name required");
+        const tabs = session.getTabs().filter((x) => /^https?:\/\//i.test(x.url)).map((x) => ({ title: x.title, url: x.url }));
+        const group = { id: Date.now().toString(36), name, tabs, createdAt: Date.now() };
+        await workspaceData.update(activeWorkspaceId, (d) => { d.groups.unshift(group); d.groups = d.groups.slice(0, 100); });
+        res.statusCode = 201; res.setHeader("content-type", "application/json; charset=utf-8"); res.end(JSON.stringify(group));
+      } catch (err) { res.statusCode = 400; res.end(err instanceof Error ? err.message : "bad request"); }
+      return;
+    }
+    if (pathname === "/groups/open" && req.method === "POST") {
+      const body = await readRequestBody(req, 16 * 1024);
+      const value = JSON.parse(body.toString("utf8")) as { id?: string };
+      const data = await workspaceData.get(activeWorkspaceId);
+      const group = data.groups.find((x) => x.id === value.id);
+      if (!group) { res.statusCode = 404; res.end("group not found"); return; }
+      for (const tab of group.tabs) await session.newTab(tab.url);
+      res.statusCode = 204; res.end(); return;
+    }
+    if (pathname === "/groups" && req.method === "DELETE") {
+      const id = new URL(req.url ?? "/", "http://browserface").searchParams.get("id");
+      if (!id) { res.statusCode = 400; res.end("id required"); return; }
+      await workspaceData.update(activeWorkspaceId, (d) => { d.groups = d.groups.filter((x) => x.id !== id); });
+      res.statusCode = 204; res.end(); return;
+    }
+    if (pathname === "/workspaces" && req.method === "GET") {
+      res.statusCode = 200;
+      res.setHeader("content-type", "application/json; charset=utf-8");
+      res.setHeader("cache-control", "no-store");
+      res.end(JSON.stringify({ active: activeWorkspaceId, workspaces: workspaces.list() }));
+      return;
+    }
+    if (pathname === "/workspaces" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req, 16 * 1024);
+        const value = JSON.parse(body.toString("utf8")) as { name?: string };
+        const created = await workspaces.create(value.name ?? "");
+        res.statusCode = 201;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.end(JSON.stringify(created));
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "bad request");
+      }
+      return;
+    }
+    if (pathname === "/workspaces/activate" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req, 16 * 1024);
+        const value = JSON.parse(body.toString("utf8")) as { id?: string };
+        if (!value.id || !switchWorkspace) throw new Error("workspace id required");
+        await switchWorkspace(value.id);
+        res.statusCode = 204;
+        res.end();
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "workspace switch failed");
+      }
+      return;
+    }
+    if (pathname === "/workspaces" && req.method === "DELETE") {
+      try {
+        const url = new URL(req.url ?? "/", "http://browserface");
+        const id = url.searchParams.get("id") ?? "";
+        if (id === "main") throw new Error("main workspace cannot be removed");
+        await workspaces.remove(id);
+        res.statusCode = 204;
+        res.end();
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "bad request");
+      }
+      return;
+    }
+    if (pathname === "/files" && req.method === "GET") {
+      try {
+        const url = new URL(req.url ?? "/", "http://browserface");
+        const path = url.searchParams.get("path") ?? "";
+        const entries = await files.list(path);
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("x-content-type-options", "nosniff");
+        res.end(JSON.stringify({ path, entries }));
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "bad request");
+      }
+      return;
+    }
+    if (pathname === "/files/download" && req.method === "GET") {
+      try {
+        const url = new URL(req.url ?? "/", "http://browserface");
+        const path = url.searchParams.get("path") ?? "";
+        const filePath = files.resolvePath(path);
+        const s = await stat(filePath);
+        if (!s.isFile()) throw new Error("not a file");
+        const name = filePath.split("/").pop() ?? "download";
+        res.statusCode = 200;
+        res.setHeader("content-type", MIME[extname(name).toLowerCase()] ?? "application/octet-stream");
+        res.setHeader("content-length", String(s.size));
+        res.setHeader("content-disposition", "attachment; filename*=UTF-8''" + encodeURIComponent(name));
+        res.setHeader("cache-control", "private, no-store");
+        files.stream(path).pipe(res);
+      } catch {
+        res.statusCode = 404;
+        res.end("not found");
+      }
+      return;
+    }
+    if (pathname === "/files" && req.method === "DELETE") {
+      try {
+        const url = new URL(req.url ?? "/", "http://browserface");
+        await files.remove(url.searchParams.get("path") ?? "");
+        res.statusCode = 204;
+        res.end();
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "bad request");
+      }
+      return;
+    }
+    if (pathname === "/files/mkdir" && req.method === "POST") {
+      try {
+        const url = new URL(req.url ?? "/", "http://browserface");
+        const path = url.searchParams.get("path") ?? "";
+        const name = url.searchParams.get("name") ?? "";
+        const target = path ? path + "/" + name : name;
+        const created = await files.mkdir(target);
+        res.statusCode = 201;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({ path: created }));
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "bad request");
+      }
+      return;
+    }
+    if (pathname === "/files/rename" && req.method === "POST") {
+      try {
+        const body = await readRequestBody(req, 64 * 1024);
+        const value = JSON.parse(body.toString("utf8")) as { path?: string; name?: string };
+        const renamed = await files.rename(value.path ?? "", value.name ?? "");
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({ path: renamed }));
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "bad request");
+      }
+      return;
+    }
+    if (pathname === "/files/upload" && req.method === "POST") {
+      try {
+        const url = new URL(req.url ?? "/", "http://browserface");
+        const saved = await files.writeUpload(
+          url.searchParams.get("path") ?? "",
+          url.searchParams.get("name") ?? "",
+          req,
+        );
+        res.statusCode = 201;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.end(JSON.stringify({ path: saved }));
+      } catch (err) {
+        res.statusCode = 400;
+        res.end(err instanceof Error ? err.message : "upload failed");
+      }
+      return;
+    }
+    if (pathname === "/downloads" && req.method === "GET") {
+      try {
+        const files = await downloads.list();
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/json; charset=utf-8");
+        res.setHeader("cache-control", "no-store");
+        res.setHeader("x-content-type-options", "nosniff");
+        res.end(JSON.stringify({ files }));
+      } catch { res.statusCode = 500; res.end("internal error"); }
+      return;
+    }
+    if (pathname === "/downloads/file" && req.method === "GET") {
+      try {
+        const name = new URL(req.url ?? "/", "http://browserface").searchParams.get("name") ?? "";
+        const filePath = downloads.pathFor(name);
+        const s = await stat(filePath);
+        res.statusCode = 200;
+        res.setHeader("content-type", MIME[extname(name).toLowerCase()] ?? "application/octet-stream");
+        res.setHeader("content-length", String(s.size));
+        res.setHeader("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(name)}`);
+        res.setHeader("cache-control", "private, no-store");
+        downloads.stream(name).pipe(res);
+      } catch { res.statusCode = 404; res.end("not found"); }
+      return;
+    }
+    if (pathname === "/downloads/file" && req.method === "DELETE") {
+      try {
+        const name = new URL(req.url ?? "/", "http://browserface").searchParams.get("name") ?? "";
+        await downloads.remove(name);
+        res.statusCode = 204; res.end();
+      } catch { res.statusCode = 404; res.end("not found"); }
+      return;
+    }
+    if (pathname === "/healthz") {
       res.statusCode = 200;
       res.setHeader("content-type", "application/json; charset=utf-8");
       res.setHeader("cache-control", "no-store");
@@ -244,7 +536,16 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
       pendingActions++;
       queue = queue.then(async () => {
         try {
-          await session.dispatch(msg.action);
+          const action = msg.action;
+          if (action.type === "closeTab") {
+            const closing = session.getTabs().find((t) => t.id === action.tabId);
+            if (closing && /^https?:\/\//i.test(closing.url)) {
+              await workspaceData.update(activeWorkspaceId, (d) => {
+                d.closedTabs = [{ title: closing.title, url: closing.url, closedAt: Date.now() }, ...d.closedTabs.filter((x) => x.url !== closing.url)].slice(0, 20);
+              });
+            }
+          }
+          await session.dispatch(action);
           send({ type: "ack", id: msg.id });
         } catch (err) {
           send({
@@ -278,30 +579,101 @@ export async function startBridge(opts: BridgeOptions = {}): Promise<BridgeHandl
   // Queueing old images only increases latency, so stale frames are dropped.
   const FRAME_BACKPRESSURE_MIN_BYTES = 512 * 1024;
 
-  session.on("screenshot", (msg) => {
-    const payload = encodeScreenshot(msg);
+  const restoreSavedSessionIfNeeded = async (workspaceId: string, current: BrowserSession) => {
+    if (process.env.BROWSERFACE_AUTO_RESTORE === "0") return;
+    const currentHttp = current.getTabs().filter((x) => /^https?:\/\//i.test(x.url));
+    if (currentHttp.length) return;
+    const data = await workspaceData.get(workspaceId);
+    const saved = data.sessionTabs.filter((x) => /^https?:\/\//i.test(x.url));
+    if (!saved.length) return;
+    for (const tab of saved.slice(0, 50)) await current.newTab(tab.url).catch(() => {});
+  };
 
+  await restoreSavedSessionIfNeeded(activeWorkspaceId, session);
+
+  const bindSession = (current: BrowserSession) => {
+    const screenshot = (msg: Parameters<BrowserSession["emit"]>[1] extends never ? never : any) => {
+      const payload = encodeScreenshot(msg);
+      for (const ws of clients) {
+        if (ws.readyState !== ws.OPEN) continue;
+        const frameBackpressureBytes = Math.max(FRAME_BACKPRESSURE_MIN_BYTES, payload.byteLength * 2);
+        if (ws.bufferedAmount > frameBackpressureBytes) continue;
+        ws.send(payload);
+      }
+    };
+    const closed = () => {
+      broadcast({ type: "error", message: "browser session closed" });
+    };
+    const page = async (msg: ServerMessage) => {
+      broadcast(msg);
+      if (msg.type === "page" && !msg.loading && /^https?:\/\//i.test(msg.url)) {
+        await workspaceData.update(activeWorkspaceId, (data) => {
+          const entry = { url: msg.url, title: msg.title, visitedAt: Date.now() };
+          data.history = [entry, ...data.history.filter((x) => x.url !== msg.url)].slice(0, 1000);
+        }).catch(() => {});
+      }
+    };
+    current.on("screenshot", screenshot);
+    current.on("page", page);
+    const tabs = async (msg: ServerMessage) => {
+      broadcast(msg);
+      if (msg.type === "tabs") await workspaceData.update(activeWorkspaceId, (d) => {
+        d.sessionTabs = msg.tabs.filter((x) => /^https?:\/\//i.test(x.url)).map((x) => ({ title: x.title, url: x.url }));
+      }).catch(() => {});
+    };
+    current.on("tabs", tabs);
+    current.on("visibility", broadcast);
+    current.on("inactive", broadcast);
+    current.on("hover", broadcast);
+    current.on("selection", broadcast);
+    current.on("findResult", broadcast);
+    current.on("closed", closed);
+    return () => {
+      current.off("screenshot", screenshot);
+      current.off("page", page);
+      current.off("tabs", tabs);
+      current.off("visibility", broadcast);
+      current.off("inactive", broadcast);
+      current.off("hover", broadcast);
+      current.off("selection", broadcast);
+      current.off("findResult", broadcast);
+      current.off("closed", closed);
+    };
+  };
+
+  let unbindSession = bindSession(session);
+  let switchWorkspace: ((id: string) => Promise<void>) | null = null;
+
+  switchWorkspace = async (id: string) => {
+    if (id === activeWorkspaceId) return;
+    const item = workspaces.get(id);
+    const target = await workspaces.ensureRunning(item);
+    const next = new BrowserSession({
+      ...sessionOpts,
+      target,
+      port: undefined,
+      host: undefined,
+      targetId: undefined,
+    });
+    await next.connect();
+    await restoreSavedSessionIfNeeded(id, next);
+    await next.setDownloadPath(downloads.completed);
+    const previous = session;
+    unbindSession();
+    session = next;
+    unbindSession = bindSession(session);
+    activeWorkspaceId = id;
+    await previous.close();
     for (const ws of clients) {
       if (ws.readyState !== ws.OPEN) continue;
-
-      // Drop stale frames instead of allowing latency to accumulate.
-      const frameBackpressureBytes = Math.max(FRAME_BACKPRESSURE_MIN_BYTES, payload.byteLength * 2);
-      if (ws.bufferedAmount > frameBackpressureBytes) continue;
-
-      ws.send(payload);
+      const page = session.getPage();
+      ws.send(JSON.stringify({ type: "ready", viewport: session.getViewport(), url: page.url, title: page.title }));
+      ws.send(JSON.stringify({ type: "tabs", tabs: session.getTabs() }));
+      ws.send(JSON.stringify({ type: "visibility", visible: session.getVisibility() }));
+      const frame = await session.captureCurrentFrame().catch(() => null);
+      if (frame && ws.readyState === ws.OPEN) ws.send(encodeScreenshot(frame));
     }
-  });
-  session.on("page", broadcast);
-  session.on("tabs", broadcast);
-  session.on("visibility", broadcast);
-  session.on("inactive", broadcast);
-  session.on("hover", broadcast);
-  session.on("selection", broadcast);
-  session.on("findResult", broadcast);
-  session.on("closed", () => {
-    broadcast({ type: "error", message: "browser session closed" });
-    for (const ws of clients) ws.close();
-  });
+  };
 
   const port = opts.listenPort ?? 8768;
   const host = opts.listenHost ?? "127.0.0.1";
@@ -349,3 +721,5 @@ async function handleStatic(req: IncomingMessage, res: ServerResponse, root: str
     res.end("not found");
   }
 }
+
+[executed on device: ip-172-31-44-71 (13ee5edb-ae63-40e5-b176-f056db72d14f)]
