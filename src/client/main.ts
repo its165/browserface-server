@@ -1,3 +1,5 @@
+[Reading 1266 lines from start (total: 1266 lines, 0 remaining)]
+
 import type { ModifierKey, MouseButton, ServerMessage } from "../shared/protocol.js";
 import { createBridge } from "./bridge.js";
 import { setupFindBar } from "./find-bar.js";
@@ -193,6 +195,8 @@ function handleServerMessage(msg: ServerMessage) {
       }
       activeTabId = nextActive;
       tabs.setTabs(msg.tabs);
+      const tabCount = document.getElementById("mobile-tab-count");
+      if (tabCount) tabCount.textContent = String(msg.tabs.length);
       return;
     }
     case "visibility":
@@ -403,6 +407,9 @@ function applyOrient(o: Orient) {
   document.body.classList.toggle("orient-vertical", o === "vertical");
 }
 function closeMobileSidebar() {
+  document.body.classList.remove("tabs-manager-open");
+  const tabManager = document.getElementById("tab-sidebar");
+  tabManager?.setAttribute("aria-hidden", "true");
   if (window.innerWidth >= MOBILE_BP) return;
   if (!document.body.classList.contains("orient-vertical")) return;
   applyOrient("horizontal");
@@ -546,11 +553,11 @@ function handleVisualViewport() {
 
   lastViewportHeight = currentHeight;
 
-  // The keyboard changes the usable browser viewport. Refit on the next
-  // animation frame so the layout has settled before measuring the stage.
-  // This keeps the remote frame anchored and visible instead of letting the
-  // browser pan the whole bridge page around the focused helper.
-  requestAnimationFrame(() => fitFrame());
+  // When the OS keyboard opens, mobile browsers can shrink the visual
+  // viewport dramatically. Do not refit the remote browser to that temporary
+  // height: doing so makes the cloud browser visibly jump/shrink. Keep the
+  // existing frame geometry while the keyboard is open.
+  if (!keyboardOpen) requestAnimationFrame(() => fitFrame());
 }
 
 window.addEventListener("resize", () => {
@@ -791,3 +798,473 @@ els.vpDesktopSize.addEventListener("click", () => {
   });
 });
 
+
+
+// Server-side download manager. Files stay on the dedicated server volume;
+// "Download to phone" is an explicit, user-triggered transfer.
+const downloadsButton = document.getElementById("downloads") as HTMLButtonElement | null;
+const downloadsPanel = document.getElementById("downloads-panel") as HTMLElement | null;
+const downloadsClose = document.getElementById("downloads-close") as HTMLButtonElement | null;
+const downloadsList = document.getElementById("downloads-list") as HTMLElement | null;
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(1)} GB`;
+}
+
+async function refreshDownloads() {
+  if (!downloadsList) return;
+  try {
+    const r = await fetch("./downloads", { cache: "no-store" });
+    if (!r.ok) throw new Error("download list unavailable");
+    const data = await r.json() as { files?: Array<{name:string;size:number;mtime:number}> };
+    const files = data.files ?? [];
+    if (!files.length) {
+      downloadsList.innerHTML = '<div class="downloads-empty">No downloads yet.</div>';
+      return;
+    }
+    downloadsList.replaceChildren(...files.map((file) => {
+      const row = document.createElement("div");
+      row.className = "download-row";
+      const info = document.createElement("div");
+      info.className = "download-info";
+      const name = document.createElement("div");
+      name.className = "download-name";
+      name.textContent = file.name;
+      const meta = document.createElement("div");
+      meta.className = "download-meta";
+      meta.textContent = formatBytes(file.size);
+      info.append(name, meta);
+      const actions = document.createElement("div");
+      actions.className = "download-actions";
+      const phone = document.createElement("a");
+      phone.className = "download-phone";
+      phone.textContent = "To phone";
+      phone.href = `./downloads/file?name=${encodeURIComponent(file.name)}`;
+      phone.download = file.name;
+      const del = document.createElement("button");
+      del.type = "button";
+      del.textContent = "Delete";
+      del.addEventListener("click", async () => {
+        del.disabled = true;
+        try {
+          await fetch(`./downloads/file?name=${encodeURIComponent(file.name)}`, { method: "DELETE" });
+          await refreshDownloads();
+        } catch { del.disabled = false; }
+      });
+      actions.append(phone, del);
+      row.append(info, actions);
+      return row;
+    }));
+  } catch {
+    downloadsList.innerHTML = '<div class="downloads-empty">Downloads unavailable.</div>';
+  }
+}
+
+downloadsButton?.addEventListener("click", () => {
+  if (!downloadsPanel) return;
+  downloadsPanel.hidden = !downloadsPanel.hidden;
+  if (!downloadsPanel.hidden) void refreshDownloads();
+});
+downloadsClose?.addEventListener("click", () => { if (downloadsPanel) downloadsPanel.hidden = true; });
+window.setInterval(() => { if (downloadsPanel && !downloadsPanel.hidden) void refreshDownloads(); }, 3000);
+
+// Server-side file manager. Everything here lives outside the project tree.
+const filesButton = document.getElementById("files") as HTMLButtonElement | null;
+const filesPanel = document.getElementById("files-panel") as HTMLElement | null;
+const filesClose = document.getElementById("files-close") as HTMLButtonElement | null;
+const filesList = document.getElementById("files-list") as HTMLElement | null;
+const filesBreadcrumb = document.getElementById("files-breadcrumb") as HTMLElement | null;
+const filesUp = document.getElementById("files-up") as HTMLButtonElement | null;
+const filesRefresh = document.getElementById("files-refresh") as HTMLButtonElement | null;
+const filesNewFolder = document.getElementById("files-new-folder") as HTMLButtonElement | null;
+const filesUpload = document.getElementById("files-upload") as HTMLButtonElement | null;
+const filesUploadInput = document.getElementById("files-upload-input") as HTMLInputElement | null;
+let filesPath = "";
+
+function formatFileDate(ms: number): string {
+  return new Date(ms).toLocaleString([], { dateStyle: "short", timeStyle: "short" });
+}
+
+function fileUrl(path: string): string {
+  return "./files/download?path=" + encodeURIComponent(path);
+}
+
+function renderFilesBreadcrumb() {
+  if (!filesBreadcrumb) return;
+  const parts = filesPath ? filesPath.split("/") : [];
+  filesBreadcrumb.replaceChildren();
+  const root = document.createElement("button");
+  root.type = "button";
+  root.textContent = "Browserface";
+  root.onclick = () => { filesPath = ""; void refreshFiles(); };
+  filesBreadcrumb.append(root);
+  let acc = "";
+  parts.forEach((part) => {
+    const sep = document.createElement("span");
+    sep.textContent = "/";
+    filesBreadcrumb.append(sep);
+    acc = acc ? acc + "/" + part : part;
+    const p = acc;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = part;
+    b.onclick = () => { filesPath = p; void refreshFiles(); };
+    filesBreadcrumb.append(b);
+  });
+}
+
+async function refreshFiles() {
+  if (!filesList) return;
+  renderFilesBreadcrumb();
+  filesList.innerHTML = "<div class=\"downloads-empty\">Loading…</div>";
+  try {
+    const r = await fetch("./files?path=" + encodeURIComponent(filesPath), { cache: "no-store" });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json() as { entries?: Array<{name:string;path:string;kind:"file"|"directory";size:number;mtime:number}> };
+    const entries = data.entries ?? [];
+    if (!entries.length) {
+      filesList.innerHTML = "<div class=\"downloads-empty\">Empty folder.</div>";
+      return;
+    }
+    filesList.replaceChildren(...entries.map((entry) => {
+      const row = document.createElement("div");
+      row.className = "file-row";
+      const main = document.createElement("div");
+      main.className = "file-main";
+      const icon = document.createElement("span");
+      icon.className = "file-icon";
+      icon.textContent = entry.kind === "directory" ? "📁" : "📄";
+      const info = document.createElement("div");
+      const name = document.createElement("div");
+      name.className = "file-name";
+      name.textContent = entry.name;
+      const meta = document.createElement("div");
+      meta.className = "file-meta";
+      meta.textContent = entry.kind === "directory" ? "Folder" : formatBytes(entry.size) + " · " + formatFileDate(entry.mtime);
+      info.append(name, meta);
+      main.append(icon, info);
+      main.onclick = () => { if (entry.kind === "directory") { filesPath = entry.path; void refreshFiles(); } };
+      const actions = document.createElement("div");
+      actions.className = "file-actions";
+      if (entry.kind === "file") {
+        const phone = document.createElement("a");
+        phone.textContent = "To phone";
+        phone.href = fileUrl(entry.path);
+        phone.download = entry.name;
+        actions.append(phone);
+      }
+      const rename = document.createElement("button");
+      rename.type = "button";
+      rename.textContent = "Rename";
+      rename.onclick = async () => {
+        const next = window.prompt("New name", entry.name);
+        if (!next || next === entry.name) return;
+        rename.disabled = true;
+        try {
+          const r = await fetch("./files/rename", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: entry.path, name: next }) });
+          if (!r.ok) throw new Error(await r.text());
+          await refreshFiles();
+        } catch (err) { window.alert(err instanceof Error ? err.message : "Rename failed"); rename.disabled = false; }
+      };
+      const del = document.createElement("button");
+      del.type = "button";
+      del.textContent = "Delete";
+      del.onclick = async () => {
+        if (!window.confirm("Delete " + entry.name + "?")) return;
+        del.disabled = true;
+        try {
+          const r = await fetch("./files?path=" + encodeURIComponent(entry.path), { method: "DELETE" });
+          if (!r.ok) throw new Error(await r.text());
+          await refreshFiles();
+        } catch (err) { window.alert(err instanceof Error ? err.message : "Delete failed"); del.disabled = false; }
+      };
+      actions.append(rename, del);
+      row.append(main, actions);
+      return row;
+    }));
+  } catch (err) {
+    filesList.innerHTML = "<div class=\"downloads-empty\">Files unavailable: " + (err instanceof Error ? err.message : "error") + "</div>";
+  }
+}
+
+filesButton?.addEventListener("click", () => {
+  if (!filesPanel) return;
+  filesPanel.hidden = !filesPanel.hidden;
+  if (!filesPanel.hidden) void refreshFiles();
+});
+filesClose?.addEventListener("click", () => { if (filesPanel) filesPanel.hidden = true; });
+filesRefresh?.addEventListener("click", () => void refreshFiles());
+filesUp?.addEventListener("click", () => {
+  if (!filesPath) return;
+  filesPath = filesPath.split("/").slice(0, -1).join("/");
+  void refreshFiles();
+});
+filesNewFolder?.addEventListener("click", async () => {
+  const name = window.prompt("Folder name");
+  if (!name) return;
+  try {
+    const r = await fetch("./files/mkdir?path=" + encodeURIComponent(filesPath) + "&name=" + encodeURIComponent(name), { method: "POST" });
+    if (!r.ok) throw new Error(await r.text());
+    await refreshFiles();
+  } catch (err) { window.alert(err instanceof Error ? err.message : "Folder creation failed"); }
+});
+filesUpload?.addEventListener("click", () => filesUploadInput?.click());
+filesUploadInput?.addEventListener("change", async () => {
+  const selected = Array.from(filesUploadInput.files ?? []);
+  for (const file of selected) {
+    try {
+      const r = await fetch("./files/upload?path=" + encodeURIComponent(filesPath) + "&name=" + encodeURIComponent(file.name), { method: "POST", body: file });
+      if (!r.ok) throw new Error(await r.text());
+    } catch (err) { window.alert(file.name + ": " + (err instanceof Error ? err.message : "upload failed")); }
+  }
+  filesUploadInput.value = "";
+  await refreshFiles();
+});
+
+const workspacesButton = document.getElementById("workspaces") as HTMLButtonElement | null;
+const workspacesPanel = document.getElementById("workspaces-panel") as HTMLElement | null;
+const workspacesClose = document.getElementById("workspaces-close") as HTMLButtonElement | null;
+const workspacesList = document.getElementById("workspaces-list") as HTMLElement | null;
+const workspaceNew = document.getElementById("workspace-new") as HTMLButtonElement | null;
+const workspaceRefresh = document.getElementById("workspace-refresh") as HTMLButtonElement | null;
+
+async function refreshWorkspaces() {
+  if (!workspacesList) return;
+  workspacesList.innerHTML = '<div class="downloads-empty">Loading…</div>';
+  try {
+    const r = await fetch("./workspaces", { cache: "no-store" });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json() as { active: string; workspaces: Array<{id:string;name:string;port:number;builtIn?:boolean}> };
+    if (!data.workspaces.length) {
+      workspacesList.innerHTML = '<div class="downloads-empty">No workspaces.</div>';
+      return;
+    }
+    workspacesList.replaceChildren(...data.workspaces.map((workspace) => {
+      const row = document.createElement("div");
+      row.className = "file-row";
+      const main = document.createElement("div");
+      main.className = "file-main";
+      const icon = document.createElement("span");
+      icon.className = "file-icon";
+      icon.textContent = workspace.id === data.active ? "●" : "○";
+      const info = document.createElement("div");
+      const name = document.createElement("div");
+      name.className = "file-name";
+      name.textContent = workspace.name + (workspace.id === data.active ? " · Active" : "");
+      const meta = document.createElement("div");
+      meta.className = "file-meta";
+      meta.textContent = workspace.builtIn ? "Main persistent profile" : "Isolated persistent profile";
+      info.append(name, meta);
+      main.append(icon, info);
+      const actions = document.createElement("div");
+      actions.className = "file-actions";
+      if (workspace.id !== data.active) {
+        const activate = document.createElement("button");
+        activate.type = "button";
+        activate.textContent = "Open";
+        activate.onclick = async () => {
+          activate.disabled = true;
+          try {
+            const r = await fetch("./workspaces/activate", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: workspace.id }) });
+            if (!r.ok) throw new Error(await r.text());
+            await refreshWorkspaces();
+          } catch (err) { window.alert(err instanceof Error ? err.message : "Workspace switch failed"); activate.disabled = false; }
+        };
+        actions.append(activate);
+      }
+      if (!workspace.builtIn && workspace.id !== data.active) {
+        const del = document.createElement("button");
+        del.type = "button";
+        del.textContent = "Delete";
+        del.onclick = async () => {
+          if (!window.confirm("Delete workspace " + workspace.name + "?")) return;
+          const r = await fetch("./workspaces?id=" + encodeURIComponent(workspace.id), { method: "DELETE" });
+          if (r.ok) await refreshWorkspaces();
+          else window.alert(await r.text());
+        };
+        actions.append(del);
+      }
+      row.append(main, actions);
+      return row;
+    }));
+  } catch (err) {
+    workspacesList.innerHTML = "<div class=\"downloads-empty\">Workspaces unavailable: " + (err instanceof Error ? err.message : "error") + "</div>";
+  }
+}
+
+workspacesButton?.addEventListener("click", () => {
+  if (!workspacesPanel) return;
+  workspacesPanel.hidden = !workspacesPanel.hidden;
+  if (!workspacesPanel.hidden) void refreshWorkspaces();
+});
+workspacesClose?.addEventListener("click", () => { if (workspacesPanel) workspacesPanel.hidden = true; });
+workspaceRefresh?.addEventListener("click", () => void refreshWorkspaces());
+workspaceNew?.addEventListener("click", async () => {
+  const name = window.prompt("Workspace name");
+  if (!name) return;
+  workspaceNew.disabled = true;
+  try {
+    const r = await fetch("./workspaces", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) });
+    if (!r.ok) throw new Error(await r.text());
+    await refreshWorkspaces();
+  } catch (err) { window.alert(err instanceof Error ? err.message : "Workspace creation failed"); }
+  finally { workspaceNew.disabled = false; }
+});
+
+const reopenTabButton = document.getElementById("reopen-tab") as HTMLButtonElement | null;
+reopenTabButton?.addEventListener("click", async () => {
+  reopenTabButton.disabled = true;
+  try {
+    const r = await fetch("./session/reopen", { method: "POST" });
+    if (!r.ok && r.status !== 404) throw new Error(await r.text());
+    if (r.status === 404) showToast("No recently closed tab");
+  } catch (err) { showToast(err instanceof Error ? err.message : "Could not reopen tab"); }
+  finally { reopenTabButton.disabled = false; }
+});
+
+const libraryButton = document.getElementById("library") as HTMLButtonElement | null;
+const libraryPanel = document.getElementById("library-panel") as HTMLElement | null;
+const libraryClose = document.getElementById("library-close") as HTMLButtonElement | null;
+const libraryList = document.getElementById("library-list") as HTMLElement | null;
+const bookmarkCurrent = document.getElementById("bookmark-current") as HTMLButtonElement | null;
+const sessionSave = document.getElementById("session-save") as HTMLButtonElement | null;
+const sessionRestore = document.getElementById("session-restore") as HTMLButtonElement | null;
+const sessionReplace = document.getElementById("session-replace") as HTMLButtonElement | null;
+const groupSave = document.getElementById("group-save") as HTMLButtonElement | null;
+
+async function refreshLibrary() {
+  if (!libraryList) return;
+  try {
+    const r = await fetch("./library", { cache: "no-store" });
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json() as { bookmarks: Array<{id:string;title:string;url:string}>; history: Array<{title:string;url:string;visitedAt:number}>; sessionTabs: Array<{title:string;url:string}>; groups: Array<{id:string;name:string;tabs:Array<{title:string;url:string}>}> };
+    libraryList.replaceChildren();
+    const section = (label: string) => { const h = document.createElement("div"); h.className = "file-meta"; h.textContent = label; h.style.padding = "10px 4px 4px"; libraryList.append(h); };
+    const row = (title: string, url: string, action: () => void, extra?: () => void) => {
+      const el = document.createElement("div"); el.className = "file-row";
+      const main = document.createElement("div"); main.className = "file-main";
+      const info = document.createElement("div");
+      const name = document.createElement("div"); name.className = "file-name"; name.textContent = title || url;
+      const meta = document.createElement("div"); meta.className = "file-meta"; meta.textContent = url;
+      info.append(name, meta); main.append(info); main.addEventListener("click", action);
+      const actions = document.createElement("div"); actions.className = "file-actions";
+      const open = document.createElement("button"); open.type = "button"; open.textContent = "Open"; open.onclick = action; actions.append(open);
+      if (extra) { const x = document.createElement("button"); x.type = "button"; x.textContent = "×"; x.onclick = extra; actions.append(x); }
+      el.append(main, actions); libraryList.append(el);
+    };
+    if (data.bookmarks.length) {
+      section("BOOKMARKS");
+      for (const b of data.bookmarks.slice(0, 50)) row(b.title, b.url, () => bridge.send({ type: "navigate", url: b.url }), async () => { await fetch("./bookmarks?url=" + encodeURIComponent(b.url), { method: "DELETE" }); await refreshLibrary(); });
+    }
+    if (data.groups.length) {
+      section("TAB GROUPS");
+      for (const g of data.groups) row(g.name, `${g.tabs.length} saved tabs`, async () => { const r = await fetch("./groups/open", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: g.id }) }); if (!r.ok) window.alert(await r.text()); }, async () => { await fetch("./groups?id=" + encodeURIComponent(g.id), { method: "DELETE" }); await refreshLibrary(); });
+    }
+    if (data.sessionTabs.length) {
+      section("SAVED SESSION");
+      const info = document.createElement("div"); info.className = "downloads-empty"; info.textContent = `${data.sessionTabs.length} tabs saved in this workspace`; libraryList.append(info);
+    }
+    if (data.history.length) {
+      section("RECENT HISTORY");
+      for (const h of data.history.slice(0, 50)) row(h.title, h.url, () => bridge.send({ type: "navigate", url: h.url }));
+    }
+    if (!libraryList.childElementCount) libraryList.innerHTML = '<div class="downloads-empty">Nothing saved yet.</div>';
+  } catch (err) { libraryList.innerHTML = '<div class="downloads-empty">Library unavailable: ' + (err instanceof Error ? err.message : "error") + '</div>'; }
+}
+
+libraryButton?.addEventListener("click", () => { if (!libraryPanel) return; libraryPanel.hidden = !libraryPanel.hidden; if (!libraryPanel.hidden) void refreshLibrary(); });
+libraryClose?.addEventListener("click", () => { if (libraryPanel) libraryPanel.hidden = true; });
+bookmarkCurrent?.addEventListener("click", async () => {
+  const url = els.url.value.trim(); if (!/^https?:\/\//i.test(url)) { window.alert("Open a web page first."); return; }
+  const r = await fetch("./bookmarks", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ url, title: document.title.replace(/ — browserface$/, "") }) });
+  if (!r.ok) window.alert(await r.text()); else await refreshLibrary();
+});
+async function sessionAction(path: string) { const r = await fetch(path, { method: "POST" }); if (!r.ok) window.alert(await r.text()); else await refreshLibrary(); }
+sessionSave?.addEventListener("click", () => void sessionAction("./session/save"));
+sessionRestore?.addEventListener("click", () => void sessionAction("./session/restore"));
+sessionReplace?.addEventListener("click", () => void sessionAction("./session/restore?replace=1"));
+groupSave?.addEventListener("click", async () => { const name = window.prompt("Tab group name"); if (!name) return; const r = await fetch("./groups", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name }) }); if (!r.ok) window.alert(await r.text()); else await refreshLibrary(); });
+
+
+// ── Mobile-first navigation + unified menu ─────────────────────────────────
+const browserMenu = document.getElementById("browser-menu") as HTMLButtonElement | null;
+const mobileMenu = document.getElementById("mobile-menu") as HTMLButtonElement | null;
+const browserMenuPanel = document.getElementById("browser-menu-panel") as HTMLElement | null;
+const menuScrim = document.getElementById("menu-scrim") as HTMLElement | null;
+const browserMenuClose = document.getElementById("browser-menu-close") as HTMLButtonElement | null;
+const mobileTabs = document.getElementById("mobile-tabs") as HTMLButtonElement | null;
+const mobileNewTab = document.getElementById("mobile-new-tab") as HTMLButtonElement | null;
+const mobileHome = document.getElementById("mobile-home") as HTMLButtonElement | null;
+const menuStatus = document.getElementById("menu-status") as HTMLElement | null;
+const menuFps = document.getElementById("menu-fps") as HTMLElement | null;
+const menuViewport = document.getElementById("menu-viewport") as HTMLElement | null;
+const menuPageTitle = document.getElementById("menu-page-title") as HTMLElement | null;
+
+function setBrowserMenu(open: boolean) {
+  if (!browserMenuPanel) return;
+  browserMenuPanel.hidden = !open;
+  if (menuScrim) menuScrim.hidden = !open;
+  browserMenu?.setAttribute("aria-expanded", String(open));
+  if (open) {
+    menuPageTitle && (menuPageTitle.textContent = document.title.replace(/ — browserface$/, "") || "Browser");
+    updateMenuStats();
+  }
+}
+function updateMenuStats() {
+  if (menuStatus) menuStatus.textContent = els.status.textContent || "—";
+  if (menuFps) menuFps.textContent = els.fps.textContent || "—";
+  if (menuViewport) menuViewport.textContent = `${viewport.width} × ${viewport.height}`;
+}
+function runMenuAction(action: string) {
+  setBrowserMenu(false);
+  if (action === "downloads") document.getElementById("downloads")?.click();
+  else if (action === "files") document.getElementById("files")?.click();
+  else if (action === "workspaces") document.getElementById("workspaces")?.click();
+  else if (action === "library") document.getElementById("library")?.click();
+  else if (action === "reopen") document.getElementById("reopen-tab")?.click();
+  else if (action === "focus") toggleFocusMode();
+  else if (action === "fullscreen") void toggleFullscreen();
+  else if (action === "external") document.getElementById("open-external")?.click();
+  else if (action === "find") {
+    // Use the existing keyboard path so the current find implementation remains authoritative.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true }));
+  }
+}
+browserMenu?.addEventListener("click", () => setBrowserMenu(browserMenuPanel?.hidden !== false));
+mobileMenu?.addEventListener("click", () => setBrowserMenu(browserMenuPanel?.hidden !== false));
+browserMenuClose?.addEventListener("click", () => setBrowserMenu(false));
+menuScrim?.addEventListener("click", () => setBrowserMenu(false));
+browserMenuPanel?.querySelectorAll<HTMLButtonElement>("[data-menu-action]").forEach((button) => {
+  button.addEventListener("click", () => runMenuAction(button.dataset.menuAction || ""));
+});
+
+mobileTabs?.addEventListener("click", () => {
+  setBrowserMenu(false);
+  document.body.classList.add("tabs-manager-open");
+  els.tabSidebar.setAttribute("aria-hidden", "false");
+});
+mobileNewTab?.addEventListener("click", () => {
+  setBrowserMenu(false);
+  bridge.send({ type: "newTab" });
+  toolbar.focusUrl();
+});
+mobileHome?.addEventListener("click", () => {
+  setBrowserMenu(false);
+  bridge.send({ type: "newTab", url: "chrome://newtab/" });
+  toolbar.focusUrl();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    if (browserMenuPanel && !browserMenuPanel.hidden) setBrowserMenu(false);
+    if (document.body.classList.contains("tabs-manager-open")) closeMobileSidebar();
+  }
+});
+
+// Keep the compact performance readout current without introducing a second status system.
+setInterval(updateMenuStats, 1000);
+
+[executed on device: ip-172-31-44-71 (13ee5edb-ae63-40e5-b176-f056db72d14f)]
